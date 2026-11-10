@@ -1,0 +1,117 @@
+diff --git a/packages/backend/src/config/auth.ts b/packages/backend/src/config/auth.ts
+index b5808c6d..6f57ee37 100644
+--- a/packages/backend/src/config/auth.ts
++++ b/packages/backend/src/config/auth.ts
+@@ -6,6 +6,7 @@ import { OAUTH_PROVIDER, SocialOAuthProvider } from '@bt/shared/types';
+ import { EnvVar, isEnvConfigured } from '@common/utils/env';
+ import { getAppleClientSecretFromEnv } from '@config/apple-client-secret';
+ import { createSessionHooks } from '@config/auth-hooks/session-hooks';
++import { standardOAuthTokenResponse } from '@config/oauth-token-interop';
+ import { oidcConfig } from '@config/oidc';
+ import { shouldUseSecureCookies } from '@config/should-use-secure-cookies';
+ import { isAuthApiError } from '@controllers/helpers/error-handler';
+@@ -23,6 +24,7 @@ import { sendPasswordResetEmail } from '@services/user/send-password-reset-email
+ import { areSignupsOpen } from '@services/user/signups-open.service';
+ import bcrypt from 'bcryptjs';
+ import { APIError, betterAuth } from 'better-auth';
++import { createAuthMiddleware } from 'better-auth/api';
+ import { genericOAuth, jwt } from 'better-auth/plugins';
+ import { randomUUID } from 'node:crypto';
+ import { Pool } from 'pg';
+@@ -287,6 +289,13 @@ export const auth = betterAuth({
+     },
+   },
+ 
++  hooks: {
++    after: createAuthMiddleware(async (ctx) => {
++      const response = standardOAuthTokenResponse(ctx.path, ctx.context.returned);
++      if (response) return ctx.json(response);
++    }),
++  },
++
+   // Plugins
+   plugins: [
+     ...(oidcConfig
+diff --git a/packages/backend/src/config/oauth-token-interop.ts b/packages/backend/src/config/oauth-token-interop.ts
+new file mode 100644
+index 00000000..11b39bc3
+--- /dev/null
++++ b/packages/backend/src/config/oauth-token-interop.ts
+@@ -0,0 +1,28 @@
++/**
++ * Better Auth's OAuth provider includes an extra numeric `expires_at` field
++ * in token responses. The MCPProxy/mcp-go client decodes that optional field
++ * as a JSON RFC3339 timestamp (Go time.Time), so the numeric extension causes
++ * an otherwise successful authorization-code exchange to fail.
++ *
++ * RFC 6749 uses `expires_in` in seconds; removing the optional extension
++ * makes the response interoperable without changing token lifetime/storage.
++ * Apply ONLY to successful /oauth2/token responses (both initial and refresh).
++ */
++export function standardOAuthTokenResponse(path: string, payload: unknown): Record<string, unknown> | null {
++  if (path !== '/oauth2/token' || !payload || typeof payload !== 'object' || Array.isArray(payload)) {
++    return null;
++  }
++  const fields = payload as Record<string, unknown>;
++  if (
++    typeof fields.access_token !== 'string' ||
++    typeof fields.token_type !== 'string' ||
++    typeof fields.expires_in !== 'number' ||
++    !Number.isFinite(fields.expires_in) ||
++    typeof fields.expires_at !== 'number'
++  ) {
++    return null;
++  }
++  const result = { ...fields };
++  delete result.expires_at;
++  return result;
++}
+diff --git a/packages/backend/src/config/oauth-token-interop.unit.ts b/packages/backend/src/config/oauth-token-interop.unit.ts
+new file mode 100644
+index 00000000..6253cab4
+--- /dev/null
++++ b/packages/backend/src/config/oauth-token-interop.unit.ts
+@@ -0,0 +1,43 @@
++import { standardOAuthTokenResponse } from './oauth-token-interop';
++
++describe('Better Auth OAuth token response interoperability', () => {
++  const sample = {
++    access_token: 'synthetic-not-a-secret',
++    refresh_token: 'synthetic-refresh',
++    token_type: 'Bearer',
++    expires_in: 72 * 3600,
++    expires_at: 1793000000,
++    scope: 'finance:read offline_access',
++  };
++
++  test('removes only the non-standard numeric expiry from authorization_code response', () => {
++    const result = standardOAuthTokenResponse('/oauth2/token', sample);
++    expect(result).toEqual({
++      access_token: sample.access_token,
++      refresh_token: sample.refresh_token,
++      token_type: sample.token_type,
++      expires_in: sample.expires_in,
++      scope: sample.scope,
++    });
++    expect(sample.expires_at).toBe(1793000000);
++  });
++
++  test('handles refresh responses while preserving rotated refresh tokens', () => {
++    const response = { ...sample, expires_in: 3600, refresh_token: 'new-refresh' };
++    expect(standardOAuthTokenResponse('/oauth2/token', response)).toEqual({
++      access_token: sample.access_token,
++      refresh_token: 'new-refresh',
++      token_type: 'Bearer',
++      expires_in: 3600,
++      scope: sample.scope,
++    });
++  });
++
++  test('does not change other auth endpoints or error responses', () => {
++    expect(standardOAuthTokenResponse('/oauth2/authorize', sample)).toBeNull();
++    expect(standardOAuthTokenResponse('/oauth2/introspect', sample)).toBeNull();
++    expect(standardOAuthTokenResponse('/oauth2/token', { error: 'invalid_grant' })).toBeNull();
++    expect(standardOAuthTokenResponse('/oauth2/token', { ...sample, expires_at: undefined })).toBeNull();
++    expect(standardOAuthTokenResponse('/oauth2/token', null)).toBeNull();
++  });
++});
