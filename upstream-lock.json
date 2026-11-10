@@ -1,0 +1,8 @@
+{
+  "schema": "cloud9-moneymatter-upstream-lock-v1",
+  "upstream": "letehaha/moneymatter",
+  "stable_tag": "v0.33.14",
+  "patch_repository": "GodsQuantum/Cloud9-local-Patches",
+  "patch": "MoneyMatter/patches/oauth-prod-20261022.patch",
+  "state": "v0.33.14 patch validated outside production; prod still October backend"
+}
