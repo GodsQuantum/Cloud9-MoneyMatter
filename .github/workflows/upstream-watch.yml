@@ -1,26 +1,115 @@
-name: Track MoneyMatter stable upstream (no auto deploy)
+name: Build verified MoneyMatter OAuth candidate from official stable release
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: "25 6 * * 1"
   workflow_dispatch:
 permissions:
   contents: read
+  packages: write
   issues: write
+concurrency:
+  group: cloud9-money-candidate-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  release:
+  verify-and-publish-candidate:
     runs-on: ubuntu-latest
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
-      - name: Compare official latest stable release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
+      - name: Validate public patch repository and license
+        shell: bash
         run: |
           set -euo pipefail
+          python3 scripts/privacy.py
+          test -s LICENSE
+          test -s patches/Cloud9-OAuth-RFC6749.patch
+          test -s README.md
+          test -s README.fr.md
+          test -s README.zh-CN.md
+      - id: upstream
+        name: Resolve official MoneyMatter stable release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh api repos/letehaha/moneymatter/releases/latest --jq .tag_name)"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
           baseline="$(python3 -c 'import json;print(json.load(open("upstream-lock.json"))["stable_tag"])')"
-          latest="$(gh api repos/letehaha/moneymatter/releases/latest --jq .tag_name)"
-          test -n "$latest"
-          if [ "$latest" = "$baseline" ]; then exit 0; fi
-          title="Review MoneyMatter upstream $latest"
-          if gh issue list --state open --limit 100 --json title --jq '.[].title' | grep -Fx "$title" >/dev/null; then exit 0; fi
-          gh issue create --title "$title" --body "MoneyMatter changed from $baseline to $latest. Before promotion, test the OAuth RFC6749 compatibility patch, MCPProxy token exchange, frontend FR parity, PostgreSQL migrations and rollback. Do NOT auto deploy."
+          if [ "$tag" != "$baseline" ]; then
+            title="Review MoneyMatter upstream $tag"
+            if ! gh issue list --state open --limit 100 --json title --jq '.[].title' | grep -Fx "$title" >/dev/null; then
+              gh issue create --title "$title" --body "Official stable release advanced from $baseline to $tag. A tested GHCR candidate will be available if this workflow passes. Production still requires database migration, French frontend parity, OAuth exchange and rollback validation."
+            fi
+          fi
+          echo "OFFICIAL_STABLE_RELEASE=$tag"
+      - name: Fetch full official application at exact tagged release
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$UPSTREAM_TAG" https://github.com/letehaha/moneymatter.git upstream
+          echo "UPSTREAM_SHA=$(git -C upstream rev-parse HEAD)" >> "$GITHUB_ENV"
+          git -C upstream status --porcelain
+      - name: Apply exactly the maintained RFC6749 token response patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd upstream
+          git apply --check ../patches/Cloud9-OAuth-RFC6749.patch
+          git apply ../patches/Cloud9-OAuth-RFC6749.patch
+          git diff --check
+          test -f packages/backend/src/config/oauth-token-interop.ts
+          test -f packages/backend/src/config/oauth-token-interop.unit.ts
+          grep -Fq "standardOAuthTokenResponse" packages/backend/src/config/auth.ts
+          grep -Fq "delete result.expires_at" packages/backend/src/config/oauth-token-interop.ts
+          echo RFC6749_PATCH_APPLIED_WITHOUT_MERGE_CONFLICT
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: upstream/package-lock.json
+      - name: Official dependencies, OAuth unit tests, and backend TypeScript type safety
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npm -w packages/backend run test:unit -- --runInBand oauth-token-interop.unit.ts
+          npm -w packages/backend run typecheck
+          echo MONEYMATTER_OAUTH_UNIT_AND_TYPESCRIPT_PASS
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish immutable backend candidate with official Dockerfile
+        uses: docker/build-push-action@v6
+        with:
+          context: ./upstream
+          file: ./upstream/self-hosting/backend/Dockerfile
+          pull: true
+          push: true
+          platforms: linux/amd64
+          tags: ghcr.io/godsquantum/cloud9-moneymatter-backend:upstream-${{ steps.upstream.outputs.version }}-patch-${{ github.sha }}-run-${{ github.run_id }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/GodsQuantum/Cloud9-MoneyMatter
+            org.opencontainers.image.title=Cloud9-MoneyMatter
+            org.opencontainers.image.description=Official MoneyMatter stable with standard OAuth token response compatibility
+            org.opencontainers.image.licenses=AGPL-3.0-only
+            org.opencontainers.image.revision=${{ github.sha }}
+            com.cloud9.upstream.revision=${{ env.UPSTREAM_SHA }}
+            com.cloud9.upstream.release=${{ steps.upstream.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Record guarded candidate in run summary
+        shell: bash
+        run: |
+          echo "Candidate: ghcr.io/godsquantum/cloud9-moneymatter-backend:upstream-${{ steps.upstream.outputs.version }}-patch-${{ github.sha }}-run-${{ github.run_id }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "NO latest tag or production deployment until OAuth, data migrations and rollback checks are certified." >> "$GITHUB_STEP_SUMMARY"

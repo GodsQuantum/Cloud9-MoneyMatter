@@ -2,7 +2,7 @@
   "schema": "cloud9-moneymatter-upstream-lock-v1",
   "upstream": "letehaha/moneymatter",
   "stable_tag": "v0.33.14",
-  "patch_repository": "GodsQuantum/Cloud9-local-Patches",
-  "patch": "MoneyMatter/patches/oauth-prod-20261022.patch",
-  "state": "v0.33.14 patch validated outside production; prod still October backend"
+  "patch_repository": "GodsQuantum/Cloud9-MoneyMatter",
+  "patch": "patches/Cloud9-OAuth-RFC6749.patch",
+  "state": "Official v0.33.14 applies cleanly; candidate CI building on GitHub; production backend remains October until OAuth/DB E2E"
 }

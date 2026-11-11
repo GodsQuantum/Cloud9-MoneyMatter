@@ -6,3 +6,7 @@ node_modules/
 backups/
 secrets/
 *.log
+
+__pycache__/
+
+*.pyc
