@@ -1,8 +1,8 @@
 {
   "schema": "cloud9-moneymatter-upstream-lock-v1",
   "upstream": "letehaha/moneymatter",
-  "stable_tag": "v0.33.14",
+  "stable_tag": "v0.33.15",
   "patch_repository": "GodsQuantum/Cloud9-MoneyMatter",
   "patch": "patches/Cloud9-OAuth-RFC6749.patch",
-  "state": "Official v0.33.14 applies cleanly; candidate CI building on GitHub; production backend remains October until OAuth/DB E2E"
+  "state": "Official v0.33.15 + RFC6749 OAuth patch production E2E passed 2026-11-12: real PostgreSQL clone 2623 transactions/2 users/2 accounts, backend health and ZFS rollback. Rolling latest only for this approved official upstream; later tags immutable candidates pending E2E."
 }
